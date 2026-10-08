@@ -40,12 +40,27 @@ var jobs = make(chan Job, MaxQueue)
 var results = make(chan Result, MaxQueue)
 var jobStore sync.Map
 
+// --- INISIALISASI DATABASE DENGAN WAL MODE & PRAGMA TUNING ---
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite", "./app.db")
+	// Membuka database dengan parameter tambahan untuk mengaktifkan WAL mode secara instan
+	db, err = sql.Open("sqlite", "./app.db?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatalf("Gagal membuka database: %v", err)
 	}
+
+	// Eksekusi tambahan PRAGMA untuk performa maksimal di tingkat koneksi
+	_, err = db.Exec(`
+	PRAGMA journal_mode = WAL;
+	PRAGMA synchronous = NORMAL;
+	PRAGMA cache_size = -2000; -- Alokasikan cache ~2MB RAM untuk SQLite
+	PRAGMA busy_timeout = 5000;
+	`)
+	if err != nil {
+		log.Fatalf("Gagal mengonfigurasi PRAGMA SQLite: %v", err)
+	}
+
+	// Buat tabel catatan
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS notes (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		content TEXT NOT NULL,
@@ -90,6 +105,7 @@ func dbWriter(writerDone *sync.WaitGroup) {
 	}
 }
 
+// --- TTL BACKGROUND CLEANER ---
 func startTTLBackgroundCleaner(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Minute)
 	go func() {
@@ -116,7 +132,7 @@ func startTTLBackgroundCleaner(ctx context.Context) {
 	}()
 }
 
-// Middleware tetap sama...
+// --- MIDDLEWARES ---
 type responseRecorder struct {
 	http.ResponseWriter
 	statusCode int
@@ -150,6 +166,7 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// --- HANDLERS ---
 func getNotesHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query("SELECT id, content, created_at FROM notes ORDER BY id DESC")
 	if err != nil {
@@ -235,6 +252,7 @@ func jobStatusHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- MAIN ROUTINE & GRACEFUL SHUTDOWN ---
 func main() {
 	if os.Getenv("API_KEY") == "" {
 		log.Fatal("KRITIS: API_KEY tidak ditemukan!")
@@ -283,37 +301,37 @@ func main() {
 
 	// Jalankan server di goroutine terpisah
 	go func() {
-		fmt.Printf("[*] Server Robust beroperasi di port 8080...\n")
+		fmt.Printf("[*] Server WAL Mode Optimal beroperasi di port 8080...\n")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server HTTP gagal: %v", err)
 		}
 	}()
 
-	// --- PENANGANAN SINYAL GRACEFUL SHUTDOWN ---
+	// Penanganan Sinyal Graceful Shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
 
 	log.Println("[SHUTDOWN] Sinyal berhenti diterima. Memulai Graceful Shutdown...")
 
-	// Langkah A: Hentikan server HTTP (tolak request baru, selesaikan request aktif)
+	// Langkah A: Hentikan server HTTP
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("[SHUTDOWN] Peringatan penutupan HTTP: %v\n", err)
 	}
 
-	// Langkah B: Tutup channel jobs dan tunggu compute workers selesai menghabiskan antrean
+	// Langkah B: Habiskan antrean komputasi
 	close(jobs)
 	workerWg.Wait()
 	log.Println("[SHUTDOWN] Semua Compute Workers selesai memproses sisa antrean.")
 
-	// Langkah C: Tutup channel results dan tunggu DB Writer menulis semuanya ke SQLite
+	// Langkah C: Habiskan antrean tulis database
 	close(results)
 	writerWg.Wait()
 	log.Println("[SHUTDOWN] DB Writer selesai menulis seluruh data ke SQLite.")
 
-	// Langkah D: Tutup koneksi database secara permanen
+	// Langkah D: Tutup database
 	db.Close()
-	log.Println("[SHUTDOWN] Sistem berhasil dimatikan dengan aman. Tidak ada data korup.")
+	log.Println("[SHUTDOWN] Sistem berhasil dimatikan dengan aman.")
 }
