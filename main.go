@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -168,7 +169,32 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 // --- HANDLERS ---
 func getNotesHandler(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query("SELECT id, content, created_at FROM notes ORDER BY id DESC")
+	query := r.URL.Query()
+
+	// Nilai default pagination
+	limit := 10
+	offset := 0
+
+	// Parse parameter limit jika ada
+	if lStr := query.Get("limit"); lStr != "" {
+		if parsedLimit, err := strconv.Atoi(lStr); err == nil && parsedLimit > 0 {
+			if parsedLimit > 100 {
+				limit = 100 // Batasi maksimal 100 item per request untuk mencegah beban berlebih
+			} else {
+				limit = parsedLimit
+			}
+		}
+	}
+
+	// Parse parameter offset jika ada
+	if oStr := query.Get("offset"); oStr != "" {
+		if parsedOffset, err := strconv.Atoi(oStr); err == nil && parsedOffset >= 0 {
+			offset = parsedOffset
+		}
+	}
+
+	// Kueri SQLite dengan LIMIT dan OFFSET
+	rows, err := db.Query("SELECT id, content, created_at FROM notes ORDER BY id DESC LIMIT ? OFFSET ?", limit, offset)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -180,7 +206,9 @@ func getNotesHandler(w http.ResponseWriter, r *http.Request) {
 		Content   string    `json:"content"`
 		CreatedAt time.Time `json:"created_at"`
 	}
-	var notes []Note
+
+	// Inisialisasi slice kosong agar menghasilkan JSON `[]` alih-alih `null` jika data kosong
+	notes := []Note{}
 	for rows.Next() {
 		var n Note
 		var tStr string
@@ -189,8 +217,13 @@ func getNotesHandler(w http.ResponseWriter, r *http.Request) {
 			notes = append(notes, n)
 		}
 	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(notes)
+	json.NewEncoder(w).Encode(map[string]any{
+		"limit":  limit,
+		"offset": offset,
+		"data":   notes,
+	})
 }
 
 func createNoteHandler(w http.ResponseWriter, r *http.Request) {
