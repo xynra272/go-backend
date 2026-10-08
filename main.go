@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
+	"runtime"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -314,6 +315,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/health", healthCheckHandler)	
 	mux.HandleFunc("/api/notes", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -367,4 +369,51 @@ func main() {
 	// Langkah D: Tutup database
 	db.Close()
 	log.Println("[SHUTDOWN] Sistem berhasil dimatikan dengan aman.")
+}
+
+func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	// 1. Periksa denyut nadi Database SQLite
+	dbStatus := "healthy"
+	if err := db.Ping(); err != nil {
+		dbStatus = "unhealthy: " + err.Error()
+	}
+
+	// 2. Ambil metrik antrean RAM
+	queueLength := len(jobs)
+	queueCapacity := cap(jobs)
+
+	// 3. Ambil statistik memori Go Runtime
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	// Konversi byte ke Megabyte (MB) untuk keterbacaan yang lebih mudah
+	allocMB := float64(m.Alloc) / 1024 / 1024
+	sysMB := float64(m.Sys) / 1024 / 1024
+
+	// Tentukan status keseluruhan sistem
+	overallStatus := "UP"
+	statusCode := http.StatusOK
+	if dbStatus != "healthy" || queueLength >= queueCapacity {
+		overallStatus = "DEGRADED"
+		statusCode = http.StatusServiceUnavailable
+	}
+
+	// Susun respons JSON
+	response := map[string]any{
+		"status":   overallStatus,
+		"database": dbStatus,
+		"queue": map[string]any{
+			"current_length": queueLength,
+			"capacity":       queueCapacity,
+		},
+		"memory": map[string]any{
+			"alloc_mb": fmt.Sprintf("%.2f MB", allocMB),
+			"sys_mb":   fmt.Sprintf("%.2f MB", sysMB),
+		},
+		"timestamp": time.Now().Format("2006-01-02 15:04:05"),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(response)
 }
