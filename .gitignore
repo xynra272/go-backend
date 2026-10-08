@@ -1,0 +1,6 @@
+server-binary
+app.db
+server.log
+nohup.out
+tmux-*.log
+.DS_Store
